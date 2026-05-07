@@ -1,7 +1,7 @@
 name: Scheduled solve dry + submit
 on:
   schedule:
-    - cron: "39 22 * * *" # 00:00 UTC daily
+    - cron: "50 22 * * *" # 00:00 UTC daily
 jobs:
   solve-dry-submit:
     runs-on: ubuntu-latest
