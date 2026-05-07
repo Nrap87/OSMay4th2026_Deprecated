@@ -37,10 +37,6 @@ function edgeKey(a: number, b: number): string {
   return a <= b ? `${a}-${b}` : `${b}-${a}`;
 }
 
-function directedEdgeKey(from: number, to: number): string {
-  return `${from}-${to}`;
-}
-
 function euclideanDistance(planetsById: Map<number, PlanetNode>, a: number, b: number): number {
   const pa = planetsById.get(a)!;
   const pb = planetsById.get(b)!;
@@ -66,74 +62,149 @@ function buildDiscountSets(routes: readonly RouteDiscount[]): { mainSet: Set<str
   return { mainSet, otherSet };
 }
 
-function edgeCost(
+/** Packed directed edge key for `Set<number>` (planet ids are < edgeMul in practice). */
+function packDirectedEdge(fromPlanetId: number, toPlanetId: number, edgeMul: number): number {
+  return fromPlanetId * edgeMul + toPlanetId;
+}
+
+/** Precomputed complete-graph leg costs + reusable Dijkstra scratch (hot path). */
+type TspGeometricGraph = {
+  n: number;
+  edgeMul: number;
+  idToIdx: Map<number, number>;
+  idxToId: number[];
+  cost: Float64Array;
+  scratch: {
+    dist: Float64Array;
+    prev: Int32Array;
+    blocked: Uint8Array;
+    pq: MinPriorityQueue<number>;
+  };
+};
+
+const EMPTY_FORBIDDEN_EDGES = new Set<number>();
+
+function buildTspGeometricGraph(
   planetsById: Map<number, PlanetNode>,
-  a: number,
-  b: number,
   mainSet: Set<string>,
   otherSet: Set<string>,
-): number {
-  const base = euclideanDistance(planetsById, a, b);
-  const key = edgeKey(a, b);
-  if (mainSet.has(key)) return 0.5 * base;
-  if (otherSet.has(key)) return (2 / 3) * base;
-  return base;
+): TspGeometricGraph {
+  const ids = [...planetsById.keys()].sort((a, b) => a - b);
+  const n = ids.length;
+  let maxId = 0;
+  for (const id of ids) {
+    if (id > maxId) maxId = id;
+  }
+  const edgeMul = maxId + 1;
+
+  const idToIdx = new Map<number, number>();
+  const idxToId = new Array<number>(n);
+  for (let i = 0; i < n; i++) {
+    idToIdx.set(ids[i]!, i);
+    idxToId[i] = ids[i]!;
+  }
+
+  const cost = new Float64Array(n * n);
+  for (let i = 0; i < n; i++) {
+    cost[i * n + i] = 0;
+    const idi = ids[i]!;
+    const pi = planetsById.get(idi)!;
+    for (let j = i + 1; j < n; j++) {
+      const idj = ids[j]!;
+      const pj = planetsById.get(idj)!;
+      const dx = pi.x - pj.x;
+      const dy = pi.y - pj.y;
+      const base = Math.sqrt(dx * dx + dy * dy);
+      const undirectedKey = edgeKey(idi, idj);
+      let w = base;
+      if (mainSet.has(undirectedKey)) w = 0.5 * base;
+      else if (otherSet.has(undirectedKey)) w = (2 / 3) * base;
+      cost[i * n + j] = w;
+      cost[j * n + i] = w;
+    }
+  }
+
+  return {
+    n,
+    edgeMul,
+    idToIdx,
+    idxToId,
+    cost,
+    scratch: {
+      dist: new Float64Array(n),
+      prev: new Int32Array(n),
+      blocked: new Uint8Array(n),
+      pq: new MinPriorityQueue<number>(),
+    },
+  };
 }
 
-function getDist(dist: Map<number, number>, node: number): number {
-  return dist.get(node) ?? Number.POSITIVE_INFINITY;
-}
-
-function dijkstra(
-  planetsById: Map<number, PlanetNode>,
+function dijkstraOnGraph(
+  g: TspGeometricGraph,
   source: number,
   target: number,
-  mainSet: Set<string>,
-  otherSet: Set<string>,
   forbiddenNodes: Set<number>,
-  forbiddenEdges: Set<string>,
+  forbiddenEdges: Set<number>,
 ): PathCandidate | null {
   if (source === target) return { cost: 0, path: [source] };
   if (forbiddenNodes.has(source) || forbiddenNodes.has(target)) return null;
 
-  const usable = [...planetsById.keys()].filter((id) => !forbiddenNodes.has(id));
-  const dist = new Map<number, number>([[source, 0]]);
-  const prev = new Map<number, number>();
-  const queue = new MinPriorityQueue<number>();
-  queue.enqueue(source, 0);
+  const srcIdx = g.idToIdx.get(source);
+  const tgtIdx = g.idToIdx.get(target);
+  if (srcIdx === undefined || tgtIdx === undefined) return null;
 
-  let next = queue.tryDequeue();
-  while (next !== undefined) {
+  const { n, idxToId, cost, edgeMul, scratch } = g;
+  const dist = scratch.dist;
+  const prev = scratch.prev;
+  const blocked = scratch.blocked;
+  const pq = scratch.pq;
+
+  dist.fill(Number.POSITIVE_INFINITY);
+  prev.fill(-1);
+  blocked.fill(0);
+  for (const pid of forbiddenNodes) {
+    const ix = g.idToIdx.get(pid);
+    if (ix !== undefined) blocked[ix] = 1;
+  }
+
+  pq.clear();
+  dist[srcIdx] = 0;
+  pq.enqueue(srcIdx, 0);
+
+  for (;;) {
+    const next = pq.tryDequeue();
+    if (next === undefined) break;
     const u = next.value;
     const du = next.priority;
-    if (du > getDist(dist, u)) {
-      next = queue.tryDequeue();
-      continue;
-    }
-    if (u === target) break;
+    if (du > dist[u]) continue;
+    if (u === tgtIdx) break;
 
-    for (const v of usable) {
-      if (u === v) continue;
-      if (forbiddenEdges.has(directedEdgeKey(u, v))) continue;
-      const candidate = du + edgeCost(planetsById, u, v, mainSet, otherSet);
-      if (candidate < getDist(dist, v)) {
-        dist.set(v, candidate);
-        prev.set(v, u);
-        queue.enqueue(v, candidate);
+    const idU = idxToId[u]!;
+    const row = u * n;
+    for (let v = 0; v < n; v++) {
+      if (v === u || blocked[v]) continue;
+      const idV = idxToId[v]!;
+      if (forbiddenEdges.has(packDirectedEdge(idU, idV, edgeMul))) continue;
+      const cand = du + cost[row + v]!;
+      if (cand < dist[v]!) {
+        dist[v] = cand;
+        prev[v] = u;
+        pq.enqueue(v, cand);
       }
     }
-    next = queue.tryDequeue();
   }
 
-  if (!dist.has(target)) return null;
-  const path: number[] = [target];
-  let node = target;
-  while (node !== source) {
-    node = prev.get(node)!;
-    path.push(node);
+  if (!Number.isFinite(dist[tgtIdx]!)) return null;
+
+  const pathIds: number[] = [];
+  let cur = tgtIdx;
+  while (cur !== srcIdx) {
+    pathIds.push(idxToId[cur]!);
+    cur = prev[cur]!;
   }
-  path.reverse();
-  return { cost: dist.get(target)!, path };
+  pathIds.push(idxToId[srcIdx]!);
+  pathIds.reverse();
+  return { cost: dist[tgtIdx]!, path: pathIds };
 }
 
 function pathsPrefixEqual(path: readonly number[], prefix: readonly number[]): boolean {
@@ -144,66 +215,59 @@ function pathsPrefixEqual(path: readonly number[], prefix: readonly number[]): b
   return true;
 }
 
-function pathCost(
-  planetsById: Map<number, PlanetNode>,
-  path: readonly number[],
-  mainSet: Set<string>,
-  otherSet: Set<string>,
-): number {
+function pathCostOnGraph(g: TspGeometricGraph, path: readonly number[]): number {
   let total = 0;
+  const { idToIdx, cost, n } = g;
   for (let i = 0; i < path.length - 1; i++) {
-    total += edgeCost(planetsById, path[i], path[i + 1], mainSet, otherSet);
+    const ia = idToIdx.get(path[i]!);
+    const ib = idToIdx.get(path[i + 1]!);
+    if (ia === undefined || ib === undefined) return Number.POSITIVE_INFINITY;
+    total += cost[ia * n + ib]!;
   }
   return total;
 }
 
 function yenKShortestPaths(
-  planetsById: Map<number, PlanetNode>,
+  g: TspGeometricGraph,
   source: number,
   target: number,
   k: number,
-  mainSet: Set<string>,
-  otherSet: Set<string>,
   forbiddenNodes: Set<number>,
+  /** When set, skip the initial Dijkstra (must be the true shortest path for this instance). */
+  firstPathHint?: PathCandidate,
 ): PathCandidate[] {
-  const first = dijkstra(planetsById, source, target, mainSet, otherSet, forbiddenNodes, new Set<string>());
+  const first =
+    firstPathHint ?? dijkstraOnGraph(g, source, target, forbiddenNodes, EMPTY_FORBIDDEN_EDGES);
   if (first === null) return [];
 
   const accepted: PathCandidate[] = [first];
   const candidates = new MinPriorityQueue<PathCandidate>();
   const seenKeys = new Set<string>();
+  const { edgeMul } = g;
 
   for (let kth = 1; kth < k; kth++) {
-    const previous = accepted[kth - 1].path;
+    const previous = accepted[kth - 1]!.path;
     for (let i = 0; i < previous.length - 1; i++) {
-      const spurNode = previous[i];
+      const spurNode = previous[i]!;
       const rootPath = previous.slice(0, i + 1);
 
-      const localForbiddenEdges = new Set<string>();
+      const localForbiddenEdges = new Set<number>();
       for (const acceptedPath of accepted) {
         if (acceptedPath.path.length <= i) continue;
         if (pathsPrefixEqual(acceptedPath.path, rootPath)) {
-          const a = acceptedPath.path[i];
-          const b = acceptedPath.path[i + 1];
-          localForbiddenEdges.add(directedEdgeKey(a, b));
-          localForbiddenEdges.add(directedEdgeKey(b, a));
+          const a = acceptedPath.path[i]!;
+          const b = acceptedPath.path[i + 1]!;
+          localForbiddenEdges.add(packDirectedEdge(a, b, edgeMul));
+          localForbiddenEdges.add(packDirectedEdge(b, a, edgeMul));
         }
       }
 
       const localForbiddenNodes = new Set<number>(forbiddenNodes);
       for (let rootIndex = 0; rootIndex < rootPath.length - 1; rootIndex++) {
-        localForbiddenNodes.add(rootPath[rootIndex]);
+        localForbiddenNodes.add(rootPath[rootIndex]!);
       }
 
-      const spurPath = dijkstra(
-        planetsById,
-        spurNode,
-        target,
-        mainSet,
-        otherSet,
-        localForbiddenNodes,
-        localForbiddenEdges,
-      );
+      const spurPath = dijkstraOnGraph(g, spurNode, target, localForbiddenNodes, localForbiddenEdges);
       if (spurPath === null) continue;
 
       const totalPath = rootPath.slice(0, -1).concat(spurPath.path);
@@ -211,8 +275,8 @@ function yenKShortestPaths(
       if (seenKeys.has(key)) continue;
       seenKeys.add(key);
 
-      const cost = pathCost(planetsById, totalPath, mainSet, otherSet);
-      candidates.enqueue({ cost, path: totalPath }, cost);
+      const pathCostVal = pathCostOnGraph(g, totalPath);
+      candidates.enqueue({ cost: pathCostVal, path: totalPath }, pathCostVal);
     }
 
     const nextCandidate = candidates.tryDequeue();
@@ -328,8 +392,7 @@ function strictlyBetter(
  */
 function tryStitchDisjointFromSequence(
   sequence: readonly number[],
-  kspCache: ReadonlyMap<string, PathCandidate[]>,
-  pairKeyFn: (a: number, b: number) => string,
+  pathsForPair: (from: number, to: number) => readonly PathCandidate[],
 ): { path: number[]; gross: number } | null {
   const origin = sequence[0]!;
   const visited = new Set<number>([origin]);
@@ -340,7 +403,7 @@ function tryStitchDisjointFromSequence(
     const from = sequence[segIdx]!;
     const to = sequence[segIdx + 1]!;
     const isLast = segIdx === sequence.length - 2;
-    const candidates = kspCache.get(pairKeyFn(from, to)) ?? [];
+    const candidates = pathsForPair(from, to);
     let picked: PathCandidate | null = null;
 
     for (const candidate of candidates) {
@@ -368,8 +431,7 @@ function tryStitchDisjointFromSequence(
 function greedyMandatoryVisitOrder(
   startId: number,
   mandatory: readonly number[],
-  kspCache: ReadonlyMap<string, PathCandidate[]>,
-  pairKeyFn: (a: number, b: number) => string,
+  firstLeg: (from: number, to: number) => PathCandidate | null,
 ): number[] {
   const remaining = new Set(mandatory);
   const order: number[] = [];
@@ -379,8 +441,9 @@ function greedyMandatoryVisitOrder(
     let bestNext: number | null = null;
     let bestCost = Number.POSITIVE_INFINITY;
     for (const cand of remaining) {
-      const cheapest = kspCache.get(pairKeyFn(current, cand))?.[0]?.cost;
-      if (cheapest === undefined) continue;
+      const leg = firstLeg(current, cand);
+      if (leg === null) continue;
+      const cheapest = leg.cost;
       if (cheapest < bestCost - EPSILON || (Math.abs(cheapest - bestCost) <= EPSILON && (bestNext === null || cand < bestNext))) {
         bestCost = cheapest;
         bestNext = cand;
@@ -469,49 +532,53 @@ export function solveChallengeTsp(input: SolverInput): SolverOutput {
   });
 
   const { mainSet, otherSet } = buildDiscountSets(input.routes);
-  const kspCache = new Map<string, PathCandidate[]>();
+  const g = buildTspGeometricGraph(planetsById, mainSet, otherSet);
   const pairKey = (a: number, b: number): string => `${a}-${b}`;
-  type PairStat = { from: number; to: number; count: number; cheapestCost: number | null; mostExpensiveCost: number | null };
-  const pairStats: PairStat[] = [];
+  const firstLegMemo = new Map<string, PathCandidate | null>();
+  const kspFullMemo = new Map<string, PathCandidate[]>();
 
-  for (const from of keyNodeIds) {
-    for (const to of keyNodeIds) {
-      if (from === to) continue;
-      const paths = yenKShortestPaths(planetsById, from, to, k, mainSet, otherSet, forbidden);
-      kspCache.set(pairKey(from, to), paths);
-      pairStats.push({
-        from,
-        to,
-        count: paths.length,
-        cheapestCost: paths.length > 0 ? paths[0].cost : null,
-        mostExpensiveCost: paths.length > 0 ? paths[paths.length - 1].cost : null,
-      });
+  function memoFirstLeg(from: number, to: number): PathCandidate | null {
+    const key = pairKey(from, to);
+    if (firstLegMemo.has(key)) return firstLegMemo.get(key)!;
+    const fullDone = kspFullMemo.get(key);
+    if (fullDone !== undefined) {
+      const fl = fullDone.length > 0 ? fullDone[0]! : null;
+      firstLegMemo.set(key, fl);
+      return fl;
     }
+    const p = dijkstraOnGraph(g, from, to, forbidden, EMPTY_FORBIDDEN_EDGES);
+    firstLegMemo.set(key, p);
+    return p;
   }
-  if (pairStats.length > 0) {
-    const counts = pairStats.map((x) => x.count);
-    const minCount = Math.min(...counts);
-    const maxCount = Math.max(...counts);
-    const zeroCountPairs = pairStats.filter((x) => x.count === 0).length;
-    const constrainedPairs = [...pairStats]
-      .sort((a, b) => a.count - b.count)
-      .slice(0, Math.min(10, pairStats.length))
-      .map((x) => `${x.from}->${x.to} (count=${x.count}, cheapest=${x.cheapestCost ?? "n/a"})`);
-    debugTspLog("ksp-cache-summary", {
-      pairCount: pairStats.length,
-      minCandidateCount: minCount,
-      maxCandidateCount: maxCount,
-      zeroCountPairs,
-      mostConstrainedPairs: constrainedPairs,
-    });
+
+  function memoKspFull(from: number, to: number): PathCandidate[] {
+    const key = pairKey(from, to);
+    const hit = kspFullMemo.get(key);
+    if (hit !== undefined) return hit;
+
+    let hint: PathCandidate | undefined;
+    if (firstLegMemo.has(key)) {
+      const fl = firstLegMemo.get(key)!;
+      if (fl === null) {
+        kspFullMemo.set(key, []);
+        return [];
+      }
+      hint = fl;
+    }
+
+    const paths = yenKShortestPaths(g, from, to, k, forbidden, hint);
+    kspFullMemo.set(key, paths);
+    if (!firstLegMemo.has(key)) {
+      firstLegMemo.set(key, paths.length > 0 ? paths[0]! : null);
+    }
+    return paths;
   }
 
   const reachabilityCore = [startId, ...mandatory];
   for (const from of reachabilityCore) {
     for (const to of reachabilityCore) {
       if (from === to) continue;
-      const paths = kspCache.get(pairKey(from, to)) ?? [];
-      if (paths.length === 0) {
+      if (memoFirstLeg(from, to) === null) {
         return failed(`No route between required planets ${from} and ${to}.`, k);
       }
     }
@@ -566,7 +633,7 @@ export function solveChallengeTsp(input: SolverInput): SolverOutput {
     }
 
     const segment = segments[idx];
-    const candidates = kspCache.get(pairKey(segment.from, segment.to)) ?? [];
+    const candidates = memoKspFull(segment.from, segment.to);
     if (candidates.length === 0) {
       searchCounters.pruneNoCandidates++;
       return;
@@ -605,10 +672,10 @@ export function solveChallengeTsp(input: SolverInput): SolverOutput {
   };
 
   if (mandatory.length > 0) {
-    const nnOrder = greedyMandatoryVisitOrder(startId, mandatory, kspCache, pairKey);
+    const nnOrder = greedyMandatoryVisitOrder(startId, mandatory, memoFirstLeg);
     if (nnOrder.length === mandatory.length) {
       const seedSequence = [startId, ...nnOrder, startId];
-      const stitched = tryStitchDisjointFromSequence(seedSequence, kspCache, pairKey);
+      const stitched = tryStitchDisjointFromSequence(seedSequence, memoKspFull);
       if (stitched !== null && !hasIllegalRepeats(stitched.path, startId)) {
         const bonusCredit = 0;
         const effective = stitched.gross - bonusCredit;
@@ -649,12 +716,12 @@ export function solveChallengeTsp(input: SolverInput): SolverOutput {
         let optimisticGross = 0;
         let missingEdge = false;
         for (let index = 0; index < sequence.length - 1; index++) {
-          const cheapestSegment = kspCache.get(pairKey(sequence[index], sequence[index + 1]))?.[0]?.cost;
-          if (cheapestSegment === undefined) {
+          const leg = memoFirstLeg(sequence[index]!, sequence[index + 1]!);
+          if (leg === null) {
             missingEdge = true;
             break;
           }
-          optimisticGross += cheapestSegment;
+          optimisticGross += leg.cost;
         }
         if (missingEdge) {
           searchCounters.prunePermutationBound++;
@@ -667,7 +734,7 @@ export function solveChallengeTsp(input: SolverInput): SolverOutput {
         }
         const segments: Segment[] = [];
         for (let index = 0; index < sequence.length - 1; index++) {
-          segments.push({ from: sequence[index], to: sequence[index + 1] });
+          segments.push({ from: sequence[index]!, to: sequence[index + 1]! });
         }
         currentTraceLabel = `subset#${subsetIndex} bonus=[${subset.map((b) => b.planetId).join(",") || "none"}] perm#${permutationIndex}`;
         dfsDisjoint(segments, 0, new Set<number>([startId]), 0, [startId], bonusCredit);
@@ -680,12 +747,12 @@ export function solveChallengeTsp(input: SolverInput): SolverOutput {
         let optimisticGross = 0;
         let missingEdge = false;
         for (let index = 0; index < sequence.length - 1; index++) {
-          const cheapestSegment = kspCache.get(pairKey(sequence[index], sequence[index + 1]))?.[0]?.cost;
-          if (cheapestSegment === undefined) {
+          const leg = memoFirstLeg(sequence[index]!, sequence[index + 1]!);
+          if (leg === null) {
             missingEdge = true;
             break;
           }
-          optimisticGross += cheapestSegment;
+          optimisticGross += leg.cost;
         }
         if (missingEdge) {
           searchCounters.prunePermutationBound++;
@@ -698,13 +765,19 @@ export function solveChallengeTsp(input: SolverInput): SolverOutput {
         }
         const segments: Segment[] = [];
         for (let index = 0; index < sequence.length - 1; index++) {
-          segments.push({ from: sequence[index], to: sequence[index + 1] });
+          segments.push({ from: sequence[index]!, to: sequence[index + 1]! });
         }
         currentTraceLabel = `subset#${subsetIndex} bonus=[${subset.map((b) => b.planetId).join(",") || "none"}] perm#${permutationIndex}`;
         dfsDisjoint(segments, 0, new Set<number>([startId]), 0, [startId], bonusCredit);
       }
     }
   }
+
+  debugTspLog("ksp-lazy-summary", {
+    directedPairsFirstLegMemo: firstLegMemo.size,
+    directedPairsFullKspMemo: kspFullMemo.size,
+    possibleDirectedKeyPairs: keyNodeIds.length * (keyNodeIds.length - 1),
+  });
 
   debugTspLog("search-summary", {
     ...searchCounters,

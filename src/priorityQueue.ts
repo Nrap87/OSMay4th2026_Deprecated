@@ -23,6 +23,11 @@ export class MinPriorityQueue<T> {
     return { value: root.value, priority: root.p };
   }
 
+  /** Drop all entries (reuse queue without reallocating the heap array). */
+  clear(): void {
+    this.heap.length = 0;
+  }
+
   private bubbleUp(i: number): void {
     while (i > 0) {
       const p = Math.floor((i - 1) / 2);
