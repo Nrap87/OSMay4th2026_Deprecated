@@ -572,3 +572,141 @@ button.secondary:disabled {
   cursor: not-allowed;
   filter: none;
 }
+
+/* CLI runner hub */
+.cli-running-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  margin-bottom: 20px;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  background: linear-gradient(135deg, rgba(30, 58, 138, 0.35), rgba(15, 23, 42, 0.95));
+  font-size: 0.95rem;
+}
+
+.cli-running-spinner {
+  flex-shrink: 0;
+}
+
+.cli-hub {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(268px, 1fr));
+  gap: 18px;
+  margin-bottom: 22px;
+}
+
+.cli-card {
+  border-radius: var(--radius-lg);
+  padding: 22px 22px 18px;
+  border: 1px solid var(--border-subtle);
+  background: linear-gradient(160deg, rgba(56, 189, 248, 0.12), rgba(15, 23, 42, 0.94));
+  box-shadow: var(--shadow-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 210px;
+  transition: transform 0.18s ease, border-color 0.18s ease;
+}
+
+.cli-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(56, 189, 248, 0.45);
+}
+
+.cli-card--accent {
+  background: linear-gradient(160deg, rgba(34, 211, 238, 0.14), rgba(15, 23, 42, 0.96));
+}
+
+.cli-card--bold {
+  background: linear-gradient(160deg, rgba(251, 191, 36, 0.12), rgba(15, 23, 42, 0.96));
+  border-color: rgba(251, 191, 36, 0.28);
+}
+
+.cli-card__icon {
+  font-size: 1.55rem;
+  line-height: 1;
+  opacity: 0.95;
+}
+
+.cli-card h3 {
+  margin: 0;
+  font-size: 1.08rem;
+  letter-spacing: 0.02em;
+}
+
+.cli-card p {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--text-muted);
+  flex: 1;
+  line-height: 1.45;
+}
+
+.cli-card .actions {
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+.cli-output-panel h2 {
+  margin-top: 0;
+}
+
+.cli-output-meta {
+  font-size: 0.88rem;
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+
+.cli-output-trunc {
+  color: var(--danger);
+}
+
+.cli-output-error {
+  color: var(--danger);
+  margin: 0 0 12px;
+}
+
+.cli-output-pre {
+  margin: 0;
+  max-height: min(52vh, 480px);
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.48;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #cbd5e1;
+}
+
+.cli-output-pre--err {
+  color: #fecaca;
+}
+
+.cli-github-panel .cli-github-panel__title {
+  margin: 0 0 8px;
+  font-size: 1.05rem;
+}
+
+.cli-github-panel__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.cli-github-panel__copy {
+  flex: 1;
+  min-width: min(100%, 280px);
+}
+
+.cli-github-panel__actions {
+  flex-shrink: 0;
+}
+
+.cli-github-note {
+  margin-top: 14px;
+  max-height: 120px;
+}

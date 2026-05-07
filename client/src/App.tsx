@@ -3,7 +3,7 @@ import { fetchJson, simStateUrl } from "./api";
 import { ENFORCED_PLAYER_EMAIL, ENFORCED_PLAYER_GUID, FIXTURE_PREF_KEY } from "./constants";
 import "./index.css";
 
-type View = "dash" | "cp" | "batches";
+type View = "dash" | "cp" | "batches" | "cli";
 
 interface PlanetRow {
   id: number;
@@ -123,6 +123,31 @@ interface RunBatchResponse {
   logLines: string[];
 }
 
+type CliRunKind = "solveDry" | "solveSubmit" | "solveDrySubmit";
+
+interface RunCliResponse {
+  command: CliRunKind;
+  label: string;
+  argv: string[];
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  truncated: boolean;
+}
+
+interface GithubDispatchConfigResponse {
+  configured: boolean;
+  owner: string;
+  repo: string;
+  eventType: string;
+}
+
+interface GithubDispatchTriggerResponse {
+  status: number;
+  message: string;
+}
+
 function loadFixturePref(): boolean {
   try {
     return localStorage.getItem(FIXTURE_PREF_KEY) === "1";
@@ -218,6 +243,14 @@ export default function App() {
   const [submitLoading, setSubmitLoading] = useState(false);
   const [batchDetail, setBatchDetail] = useState<StoredBatchRun | null>(null);
 
+  const [cliRunning, setCliRunning] = useState<CliRunKind | null>(null);
+  const [cliResult, setCliResult] = useState<RunCliResponse | null>(null);
+  const [cliError, setCliError] = useState<string | null>(null);
+
+  const [githubDispatchConfig, setGithubDispatchConfig] = useState<GithubDispatchConfigResponse | null>(null);
+  const [githubDispatchBusy, setGithubDispatchBusy] = useState(false);
+  const [githubDispatchNote, setGithubDispatchNote] = useState<string | null>(null);
+
   const batchDetailRef = useRef<HTMLElement | null>(null);
 
   const showAlert = useCallback((msg: string, isError: boolean) => {
@@ -259,6 +292,65 @@ export default function App() {
       loadBatchesList().catch((e: unknown) => showAlert(e instanceof Error ? e.message : String(e), true));
     }
   };
+
+  useEffect(() => {
+    if (view !== "cli") return;
+    setGithubDispatchNote(null);
+    fetchJson<GithubDispatchConfigResponse>("/api/github-dispatch-config")
+      .then(setGithubDispatchConfig)
+      .catch(() => {
+        setGithubDispatchConfig(null);
+      });
+  }, [view]);
+
+  const runCli = useCallback(async (command: CliRunKind) => {
+    setCliRunning(command);
+    setCliError(null);
+    setCliResult(null);
+    const labels: Record<CliRunKind, string> = {
+      solveDry: "solve:dry",
+      solveSubmit: "solve:submit",
+      solveDrySubmit: "solve:dry:submit",
+    };
+    try {
+      const data = await fetchJson<RunCliResponse>("/api/run-cli", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command }),
+      });
+      setCliResult(data);
+      if (data.exitCode !== 0) {
+        showAlert(`${labels[command]} exited with code ${data.exitCode ?? "—"}`, true);
+      } else {
+        showAlert(`${labels[command]} finished in ${data.durationMs}ms`, false);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setCliError(msg);
+      showAlert(msg, true);
+    } finally {
+      setCliRunning(null);
+    }
+  }, [showAlert]);
+
+  const triggerGithubRepositoryDispatch = useCallback(async () => {
+    setGithubDispatchBusy(true);
+    setGithubDispatchNote(null);
+    try {
+      const data = await fetchJson<GithubDispatchTriggerResponse>("/api/github-repository-dispatch", {
+        method: "POST",
+      });
+      const line = `GitHub responded HTTP ${data.status}. ${data.message}`;
+      setGithubDispatchNote(line);
+      showAlert("Repository dispatch sent.", false);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setGithubDispatchNote(msg);
+      showAlert(msg, true);
+    } finally {
+      setGithubDispatchBusy(false);
+    }
+  }, [showAlert]);
 
   const onFixtureChange = (checked: boolean) => {
     setUseFixture(checked);
@@ -485,6 +577,14 @@ export default function App() {
               onClick={() => goNav("batches")}
             >
               Batch runs
+            </button>
+            <button
+              type="button"
+              className="nav-link"
+              aria-current={view === "cli" ? "page" : undefined}
+              onClick={() => goNav("cli")}
+            >
+              CLI runner
             </button>
           </div>
         </nav>
@@ -804,6 +904,150 @@ export default function App() {
               </details>
             </section>
           ) : null}
+        </section>
+
+        <section id="view-cli" className={view === "cli" ? "view-panel" : "view-panel hidden"}>
+          <header className="page-header">
+            <h1>CLI runner</h1>
+            <p className="sub-hint">
+              Runs the same packaged scripts as <code>npm run solve:dry</code>, <code>solve:submit</code>, and{" "}
+              <code>solve:dry:submit</code> on the Node server. Requires <code>npm run build:server</code> so{" "}
+              <code>dist/cli/</code> exists. Submit flows call live OutSystems APIs for the enforced player.
+            </p>
+          </header>
+
+          {cliRunning ? (
+            <div className="cli-running-banner" role="status">
+              <div className="loading-spinner cli-running-spinner" aria-hidden />
+              <span>
+                Running <strong>{cliRunning === "solveDry" ? "solve:dry" : cliRunning === "solveSubmit" ? "solve:submit" : "solve:dry:submit"}</strong>…
+              </span>
+            </div>
+          ) : null}
+
+          <div className="cli-hub">
+            <article className="cli-card">
+              <div className="cli-card__icon" aria-hidden>
+                ◈
+              </div>
+              <h3>solve:dry</h3>
+              <p>Dry-run challenges including finished ones (<code>--includeFinished</code>) — solve only, no REST submit.</p>
+              <div className="actions">
+                <button type="button" disabled={cliRunning !== null || githubDispatchBusy} onClick={() => runCli("solveDry")}>
+                  Run solve:dry
+                </button>
+              </div>
+            </article>
+            <article className="cli-card cli-card--accent">
+              <div className="cli-card__icon" aria-hidden>
+                ↗
+              </div>
+              <h3>solve:submit</h3>
+              <p>
+                Solve and submit every matching challenge via{" "}
+                <code>--all --includeFinished --warnAfterMs=15000</code> (CLI requires <code>--all</code> or a challenge id).
+              </p>
+              <div className="actions">
+                <button type="button" disabled={cliRunning !== null || githubDispatchBusy} onClick={() => runCli("solveSubmit")}>
+                  Run solve:submit
+                </button>
+              </div>
+            </article>
+            <article className="cli-card cli-card--bold">
+              <div className="cli-card__icon" aria-hidden>
+                ⚡
+              </div>
+              <h3>solve:dry:submit</h3>
+              <p>
+                Parallel dry solve (<code>--parallel=3</code>) with pipelined submit — same flags as the npm script preset.
+              </p>
+              <div className="actions">
+                <button type="button" disabled={cliRunning !== null || githubDispatchBusy} onClick={() => runCli("solveDrySubmit")}>
+                  Run solve:dry:submit
+                </button>
+              </div>
+            </article>
+          </div>
+
+          <section className="panel cli-github-panel">
+            <div className="cli-github-panel__row">
+              <div className="cli-github-panel__copy">
+                <h2 className="cli-github-panel__title">GitHub workflow dispatch</h2>
+                <p className="hint muted">
+                  POST <code>repository_dispatch</code> to{" "}
+                  <code>
+                    {githubDispatchConfig
+                      ? `${githubDispatchConfig.owner}/${githubDispatchConfig.repo}`
+                      : "owner/repo"}
+                  </code>{" "}
+                  with <code>event_type</code>{" "}
+                  <code>{githubDispatchConfig?.eventType ?? "scheduled-run"}</code>. The PAT stays on the server (
+                  <code>GITHUB_DISPATCH_TOKEN</code>).
+                </p>
+                {githubDispatchConfig === null ? (
+                  <p className="muted">Could not load dispatch config from API.</p>
+                ) : null}
+                {githubDispatchConfig && !githubDispatchConfig.configured ? (
+                  <p className="cli-output-error">
+                    Set <code>GITHUB_DISPATCH_TOKEN</code> in the server environment and restart <code>npm run web</code>{" "}
+                    / <code>npm run dev</code>.
+                  </p>
+                ) : null}
+              </div>
+              <div className="cli-github-panel__actions">
+                <button
+                  type="button"
+                  disabled={
+                    cliRunning !== null ||
+                    githubDispatchBusy ||
+                    githubDispatchConfig === null ||
+                    !githubDispatchConfig.configured
+                  }
+                  onClick={() => triggerGithubRepositoryDispatch()}
+                >
+                  {githubDispatchBusy ? "Sending…" : "Trigger scheduled-run"}
+                </button>
+              </div>
+            </div>
+            {githubDispatchNote ? (
+              <pre className="cli-output-pre cli-github-note">{githubDispatchNote}</pre>
+            ) : null}
+          </section>
+
+          <section className="panel cli-output-panel">
+            <h2>Output</h2>
+            {cliError && !cliResult ? <p className="cli-output-error">{cliError}</p> : null}
+            {cliResult ? (
+              <>
+                <div className="cli-output-meta">
+                  <span className={cliResult.exitCode === 0 ? "tag tag--success" : "tag tag--danger"}>
+                    exit {cliResult.exitCode ?? "—"}
+                  </span>
+                  <span className="muted"> · {cliResult.durationMs}ms · </span>
+                  <span className="muted">{cliResult.label}</span>
+                  {cliResult.truncated ? (
+                    <span className="cli-output-trunc"> · output truncated at server cap</span>
+                  ) : null}
+                </div>
+                <details open className="batch-log-details">
+                  <summary>stdout</summary>
+                  <pre className="cli-output-pre">{cliResult.stdout || "(empty)"}</pre>
+                </details>
+                {cliResult.stderr ? (
+                  <details open className="batch-log-details">
+                    <summary>stderr</summary>
+                    <pre className="cli-output-pre cli-output-pre--err">{cliResult.stderr}</pre>
+                  </details>
+                ) : null}
+                <details className="batch-log-details">
+                  <summary>argv</summary>
+                  <pre className="cli-output-pre">{cliResult.argv.join(" ")}</pre>
+                </details>
+              </>
+            ) : (
+              <p className="muted">Run a command above to stream captured stdout/stderr here.</p>
+            )}
+          </section>
         </section>
 
         <section id="view-cp" className={view === "cp" ? "view-panel" : "view-panel hidden"}>

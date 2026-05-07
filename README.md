@@ -40,13 +40,17 @@ npm run build
 npm run web
 ```
 
-Open **http://127.0.0.1:5175**. The UI is the compiled React bundle under `public/`; all solver logic stays in Node (`src/solver.ts`, `workflow.ts`, etc.). The server loads map + daily challenges from OutSystems using the enforced player headers.
+Open **http://127.0.0.1:5175**. The UI is the compiled React bundle under `public/`; all solver logic stays in Node (`src/solver.ts`, `workflow.ts`, etc.). The server loads map + daily challenges from OutSystems using the enforced player headers. The **CLI runner** tab runs `solve:dry` (with **`--includeFinished`** so finished challenges are included), `solve:submit`, and `solve:dry:submit` equivalents via `POST /api/run-cli` (needs `dist/cli/` from `npm run build:server`).
 
 Environment (optional):
 
 | Variable | Purpose |
 |----------|---------|
 | `STAR_DELIVERY_BASE_URL` | REST base (defaults to the same URL as `Config.BaseUrl` in the .NET project). |
+| `GITHUB_DISPATCH_TOKEN` | GitHub PAT for **CLI runner → Trigger scheduled-run** (`repository_dispatch`). Never commit; restart server after setting. |
+| `GITHUB_DISPATCH_OWNER` | Optional repo owner (default `Nrap87`). |
+| `GITHUB_DISPATCH_REPO` | Optional repo name (default `OSMay4th2026`). |
+| `GITHUB_DISPATCH_EVENT_TYPE` | Optional `event_type` payload (default `scheduled-run`). |
 
 **Player identity** for REST headers and checkpoint keys is **fixed** in `src/enforcedPlayer.ts` (same values as `StarDeliveryWebDefaults` in the .NET web host). The API ignores any client-supplied GUID/email.
 

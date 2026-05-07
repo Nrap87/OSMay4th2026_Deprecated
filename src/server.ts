@@ -18,6 +18,8 @@ import type { ChallengeOut, PlanetOut, RouteOut } from "./types.js";
 import { solveGraph, type SolveGraphOptions } from "./workflow.js";
 import { WebBatchLog } from "./webBatchLog.js";
 import { getEnforcedPlayer } from "./enforcedPlayer.js";
+import { runCliCommand, type CliCommandKind } from "./cliRunnerServer.js";
+import { getGithubDispatchConfigPublic, postRepositoryDispatch } from "./githubRepositoryDispatch.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.join(__dirname, "..");
@@ -554,6 +556,48 @@ const server = http.createServer(async (req, res) => {
         restError,
         logLines,
       });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/github-dispatch-config") {
+      json(res, 200, getGithubDispatchConfigPublic());
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/github-repository-dispatch") {
+      try {
+        const result = await postRepositoryDispatch();
+        json(res, 200, result);
+      } catch (e) {
+        const msg = String((e as Error).message ?? e);
+        const status = msg.includes("not set") ? 503 : 502;
+        json(res, status, { error: msg });
+      }
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/run-cli") {
+      const raw = await readBody(req);
+      let body: { command?: string } = {};
+      try {
+        body = raw ? (JSON.parse(raw) as typeof body) : {};
+      } catch {
+        json(res, 400, { error: "Invalid JSON" });
+        return;
+      }
+      const cmd = body.command;
+      if (cmd !== "solveDry" && cmd !== "solveSubmit" && cmd !== "solveDrySubmit") {
+        json(res, 400, {
+          error: 'Body.command must be "solveDry", "solveSubmit", or "solveDrySubmit".',
+        });
+        return;
+      }
+      try {
+        const result = await runCliCommand(rootDir, cmd as CliCommandKind);
+        json(res, 200, result);
+      } catch (e) {
+        json(res, 500, { error: String((e as Error).message ?? e) });
+      }
       return;
     }
 
