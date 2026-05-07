@@ -3,12 +3,14 @@
  */
 import { parentPort, workerData } from "node:worker_threads";
 import type { ChallengeOut, PlanetOut, RouteOut, SolverResult } from "../types.js";
-import { solveGraph } from "../workflow.js";
+import { solveGraph, type SolveGraphOptions } from "../workflow.js";
 
 export type SolveDryWorkerInput = {
   planets: PlanetOut[];
   routes: RouteOut[];
   challenge: ChallengeOut;
+  /** Passed through to `solveGraph` (e.g. `{ skipAscent: true }`). */
+  solveGraphOptions?: SolveGraphOptions;
 };
 
 export type SolveDryWorkerOutput = {
@@ -25,7 +27,7 @@ if (!parentPort) {
 }
 
 const started = Date.now();
-const result = solveGraph(data.challenge, data.planets, data.routes, {});
+const result = solveGraph(data.challenge, data.planets, data.routes, data.solveGraphOptions ?? {});
 const elapsedMs = Date.now() - started;
 
 const out: SolveDryWorkerOutput = { result, elapsedMs };

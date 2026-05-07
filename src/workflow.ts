@@ -1,6 +1,7 @@
 import {
   KLadderAscentStopAfterStaleSuccesses,
   KLadderMinK,
+  KLadderSkipAscent,
   KLadderStep,
   KLadderTimeBudgetSeconds,
   KLadderTopK,
@@ -12,6 +13,11 @@ export type SolveGraphPhase = "escalate" | "ascent";
 
 export interface SolveGraphOptions {
   resumeLadderFromK?: number | null;
+  /**
+   * When true, return after first successful escalation (skip ascent).
+   * When undefined, uses {@link KLadderSkipAscent} from config.
+   */
+  skipAscent?: boolean;
   /** Millisecond clock (defaults to Date.now). */
   nowMs?: () => number;
   /** Called after each solver attempt — use to advance a fake clock for fast simulation. */
@@ -154,7 +160,8 @@ function escalationSchedule(minK: number, maxK: number, step: number, resumeFrom
 /**
  * K ladder: escalate K from {@link KLadderMinK} to {@link KLadderTopK} until first success
  * (cheap few-shortest-path tries first; more segment alternatives on retryable failure),
- * then ascend seeking strictly better routes until stale successes or time budget.
+ * then ascend seeking strictly better routes until stale successes or time budget
+ * (unless {@link SolveGraphOptions.skipAscent} or {@link KLadderSkipAscent}).
  */
 export function solveGraph(
   challenge: ChallengeOut,
@@ -164,6 +171,7 @@ export function solveGraph(
 ): SolverResult {
   const nowMs = options.nowMs ?? (() => Date.now());
   const startedMs = nowMs();
+  const skipAscent = options.skipAscent ?? KLadderSkipAscent;
   const top = KLadderTopK;
   const minK = KLadderMinK;
   const step = KLadderStep;
@@ -232,26 +240,28 @@ export function solveGraph(
     return lastFailure;
   }
 
-  let staleSuccesses = 0;
-  const ascentKs = ladderKsAscent(bestK, top, step);
-  for (const k of ascentKs) {
-    if (isKladderTimeBudgetExceeded(startedMs, nowMs)) break;
+  if (!skipAscent) {
+    let staleSuccesses = 0;
+    const ascentKs = ladderKsAscent(bestK, top, step);
+    for (const k of ascentKs) {
+      if (isKladderTimeBudgetExceeded(startedMs, nowMs)) break;
 
-    attempts++;
-    lastTriedK = k;
-    options.onBeforeSolveAttempt?.({ k, phase: "ascent" });
-    const solved = solverResultFromTsp(challenge, planets, routes, k);
-    options.afterEachAttempt?.();
+      attempts++;
+      lastTriedK = k;
+      options.onBeforeSolveAttempt?.({ k, phase: "ascent" });
+      const solved = solverResultFromTsp(challenge, planets, routes, k);
+      options.afterEachAttempt?.();
 
-    if (!solved.success) continue;
+      if (!solved.success) continue;
 
-    if (isBetterSolution(solved, best)) {
-      best = solved;
-      bestK = k;
-      staleSuccesses = 0;
-    } else {
-      staleSuccesses++;
-      if (staleSuccesses >= KLadderAscentStopAfterStaleSuccesses) break;
+      if (isBetterSolution(solved, best)) {
+        best = solved;
+        bestK = k;
+        staleSuccesses = 0;
+      } else {
+        staleSuccesses++;
+        if (staleSuccesses >= KLadderAscentStopAfterStaleSuccesses) break;
+      }
     }
   }
 

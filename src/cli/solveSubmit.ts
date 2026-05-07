@@ -7,7 +7,7 @@ import {
   type SubmissionResult,
 } from "../starDeliveryApi.js";
 import type { ChallengeOut, PlanetOut, RouteOut, SolverResult } from "../types.js";
-import { solveGraph } from "../workflow.js";
+import { solveGraph, type SolveGraphOptions } from "../workflow.js";
 import { challengeLabel, fmtNumber, printSubmitDetail } from "./challengeCliShared.js";
 import { logQuietRunTotal, out } from "./cliOutput.js";
 
@@ -61,6 +61,7 @@ function cliArgs(): string[] {
   if (process.env.npm_config_challengeid) fallback.push(`--challengeId=${process.env.npm_config_challengeid}`);
   if (process.env.npm_config_warnafterms) fallback.push(`--warnAfterMs=${process.env.npm_config_warnafterms}`);
   if (process.env.npm_config_quiet === "true") fallback.push("--quiet");
+  if (process.env.npm_config_no_ascent === "true") fallback.push("--no-ascent");
   return fallback;
 }
 
@@ -91,6 +92,8 @@ async function main(): Promise<void> {
   const args = cliArgs();
   const quiet = args.includes("--quiet");
   const includeFinished = args.includes("--includeFinished");
+  const skipAscent = args.includes("--no-ascent");
+  const graphOpts: SolveGraphOptions | undefined = skipAscent ? { skipAscent: true } : undefined;
   const showProgress = !quiet && args.includes("--progress");
   const warnAfterMs = numberArg("--warnAfterMs", args) ?? 10000;
   if (!Number.isFinite(warnAfterMs) || warnAfterMs <= 0) {
@@ -132,6 +135,7 @@ async function main(): Promise<void> {
   out(quiet, `Source: ${source}`);
   out(quiet, `Include finished: ${includeFinished ? "yes" : "no"}`);
   out(quiet, `Pending: ${pendingNames || "(none)"}`);
+  out(quiet, `K ladder ascent after first success: ${skipAscent ? "no (--no-ascent)" : "yes"}`);
   out(quiet, selectedChallengeId !== undefined ? "Submitting selected challenge..." : "Submitting all challenges...");
 
   const { playerGuid, playerEmail } = getEnforcedPlayer();
@@ -150,6 +154,7 @@ async function main(): Promise<void> {
     const oneStart = Date.now();
     let attempts = 0;
     const result = solveGraph(challenge, planets, routes, {
+      ...graphOpts,
       onBeforeSolveAttempt: ({ k, phase }) => {
         attempts++;
         if (!showProgress) return;

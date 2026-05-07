@@ -50,11 +50,11 @@ Environment (optional):
 
 **Player identity** for REST headers and checkpoint keys is **fixed** in `src/enforcedPlayer.ts` (same values as `StarDeliveryWebDefaults` in the .NET web host). The API ignores any client-supplied GUID/email.
 
-**Single-challenge dry run:** `POST /api/solve-challenge-dry` with JSON `{ "challengeId": <number>, "fastSim"?: bool, "virtualSecondsPerAttempt"?: number }` runs `solveGraph` for that challenge only (no REST submit). Checkpoints are updated on timeout like batch mode.
+**Single-challenge dry run:** `POST /api/solve-challenge-dry` with JSON `{ "challengeId": <number>, "fastSim"?: bool, "virtualSecondsPerAttempt"?: number, "skipAscent"?: bool }` runs `solveGraph` for that challenge only (no REST submit). When `skipAscent` is true, the solver stops after the first successful escalation (no post-success K climb). Checkpoints are updated on timeout like batch mode. Batch (`POST /api/run-batch`), dry stream, and `POST /api/challenge-submit` accept the same `skipAscent` field.
 
 ## Layout
 
-- `src/config.ts` — K ladder bounds (`KLadderTopK` / `Floor` / `Step`, ascent stale-stop) and `MaxRequestedK` for Yen.
+- `src/config.ts` — K ladder bounds (`KLadderTopK` / `Floor` / `Step`, ascent stale-stop, optional `KLadderSkipAscent`) and `MaxRequestedK` for Yen.
 - `src/workflow.ts` — `solveGraph()` aligned with `StarDeliveryChallengeWorkflow.SolveGraph`.
 - `src/solver.ts` — port of `Solver.Solve` (+ `src/priorityQueue.ts`).
 - `src/batchRunner.ts` — `runBatch()` mirrors `ChallengeBatchRunner` checkpoint hooks.
@@ -66,7 +66,7 @@ Environment (optional):
 
 ## Customize
 
-- Tune ladder speed vs quality in `src/config.ts` (`KLadderMinK`, `KLadderTopK`, `KLadderStep`, `KLadderAscentStopAfterStaleSuccesses`). (`KLadderFloorK` is deprecated but kept as an alias of `KLadderMinK`.)
+- Tune ladder speed vs quality in `src/config.ts` (`KLadderMinK`, `KLadderTopK`, `KLadderStep`, `KLadderAscentStopAfterStaleSuccesses`, `KLadderSkipAscent`). (`KLadderFloorK` is deprecated but kept as an alias of `KLadderMinK`.) For one-off fast runs, use CLI `--no-ascent` instead of editing config.
 - Set `createSolveOptions` to use real wall clock only: `{ }` (defaults to `Date.now`), understanding full ladder may take up to **5 minutes** per challenge.
 
 ## New constrained TSP core
@@ -91,6 +91,7 @@ Useful flags (run after build with `npm run solve:dry:run -- ...`):
 - `--parallel=<n>`: solve challenges concurrently with `n` worker threads (default `1`). Routes are computed once per challenge; results are not re-solved for submit.
 - `--submit`: call `CalculateCoaxium` then `SubmitChallengeSolution` for each successful route **in ascending `challengeId` order**. Submits are **pipelined** with parallel solves: as soon as the lowest pending id’s solve finishes, its REST submit runs while other challenges may still be solving; the next id submits only after the previous id’s HTTP chain completes. If a submit fails or returns `isSuccess=false`, later ids are skipped for submit.
 - `--warnAfterMs=<ms>`: warn when a challenge solve exceeds this duration (default `10000`).
+- `--no-ascent`: after the first successful escalation, skip the ascent phase (no further solves at higher K). Faster; may yield worse effective fuel than the full ladder. Optional npm config: `npm_config_no_ascent=true`.
 
 Example:
 
@@ -114,6 +115,7 @@ Useful flags:
 - `--progress`: print K-ladder progress (`phase`, `k`, `attempt`, elapsed ms). Disabled when `--quiet` is set.
 - `--quiet`: suppress normal stdout (same idea as dry run); errors still on stderr. Prints one final `Total elapsed: …` line for the full run (fetch + solve + submit).
 - `--warnAfterMs=<ms>`: warn when a challenge solve exceeds this duration (default `10000`). Warnings are skipped when `--quiet` is set.
+- `--no-ascent`: same as dry-run (skip post-success K climb for speed).
 
 Notes:
 

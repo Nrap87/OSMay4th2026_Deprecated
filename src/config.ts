@@ -26,3 +26,9 @@ export const KLadderTimeBudgetSeconds = 300;
  * successful solves that did not strictly improve the best (effective fuel, then gross).
  */
 export const KLadderAscentStopAfterStaleSuccesses = 2;
+
+/**
+ * When true, stop after the first successful escalation (no ascent phase).
+ * Faster runs; may miss a better route at higher K. CLI `--no-ascent` overrides per run.
+ */
+export const KLadderSkipAscent = false;

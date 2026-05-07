@@ -9,7 +9,7 @@ import {
   type SubmissionResult,
 } from "../starDeliveryApi.js";
 import type { ChallengeOut, PlanetOut, RouteOut, SolverResult } from "../types.js";
-import { solveGraph } from "../workflow.js";
+import { solveGraph, type SolveGraphOptions } from "../workflow.js";
 import {
   challengeLabel,
   fmtNumber,
@@ -108,6 +108,7 @@ function cliArgs(): string[] {
   if (process.env.npm_config_parallel) fallback.push(`--parallel=${process.env.npm_config_parallel}`);
   if (process.env.npm_config_submit === "true") fallback.push("--submit");
   if (process.env.npm_config_quiet === "true") fallback.push("--quiet");
+  if (process.env.npm_config_no_ascent === "true") fallback.push("--no-ascent");
   return fallback;
 }
 
@@ -139,11 +140,12 @@ function solveOneInWorker(
   planets: PlanetOut[],
   routes: RouteOut[],
   challenge: ChallengeOut,
+  solveGraphOptions?: SolveGraphOptions,
 ): Promise<SolveDryWorkerOutput> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const worker = new Worker(workerFilename, {
-      workerData: { planets, routes, challenge },
+      workerData: { planets, routes, challenge, solveGraphOptions },
     });
     worker.once("message", (msg: SolveDryWorkerOutput) => {
       settled = true;
@@ -201,6 +203,7 @@ async function solveAllParallel(
   planets: PlanetOut[],
   routes: RouteOut[],
   parallel: number,
+  solveGraphOptions: SolveGraphOptions | undefined,
   onComplete?: (row: SolvedRow) => void,
 ): Promise<SolvedRow[]> {
   const workerFilename = fileURLToPath(new URL("./solveDryWorker.js", import.meta.url));
@@ -213,7 +216,13 @@ async function solveAllParallel(
       const i = nextIndex++;
       if (i >= pending.length) return;
       const challenge = pending[i]!;
-      const { result, elapsedMs } = await solveOneInWorker(workerFilename, planets, routes, challenge);
+      const { result, elapsedMs } = await solveOneInWorker(
+        workerFilename,
+        planets,
+        routes,
+        challenge,
+        solveGraphOptions,
+      );
       const row: SolvedRow = { challenge, result, elapsedMs };
       results[i] = row;
       onComplete?.(row);
@@ -229,6 +238,7 @@ async function solveSequentialWithNotify(
   planets: PlanetOut[],
   routes: RouteOut[],
   showProgress: boolean,
+  solveGraphOptions: SolveGraphOptions | undefined,
   onComplete: (row: SolvedRow) => void,
 ): Promise<SolvedRow[]> {
   const solved: SolvedRow[] = [];
@@ -236,6 +246,7 @@ async function solveSequentialWithNotify(
     const oneStart = Date.now();
     let attempts = 0;
     const result = solveGraph(challenge, planets, routes, {
+      ...solveGraphOptions,
       onBeforeSolveAttempt: ({ k, phase }) => {
         attempts++;
         if (!showProgress) return;
@@ -262,6 +273,8 @@ async function main(): Promise<void> {
   const quiet = args.includes("--quiet");
   const includeFinished = args.includes("--includeFinished");
   const doSubmit = args.includes("--submit");
+  const skipAscent = args.includes("--no-ascent");
+  const graphOpts: SolveGraphOptions | undefined = skipAscent ? { skipAscent: true } : undefined;
   let showProgress = !quiet && args.includes("--progress");
   const parallelRaw = numberArg("--parallel", args) ?? 1;
   if (!Number.isFinite(parallelRaw) || parallelRaw < 1 || !Number.isInteger(parallelRaw)) {
@@ -315,6 +328,7 @@ async function main(): Promise<void> {
   out(quiet, `Source: ${source}`);
   out(quiet, `Include finished: ${includeFinished ? "yes" : "no"}`);
   out(quiet, `Parallel solve slots: ${parallel}`);
+  out(quiet, `K ladder ascent after first success: ${skipAscent ? "no (--no-ascent)" : "yes"}`);
   out(
     quiet,
     `Submit after solve: ${
@@ -349,8 +363,15 @@ async function main(): Promise<void> {
 
     const solvePromise =
       parallel === 1
-        ? solveSequentialWithNotify(pendingOrdered, planets, routes, showProgress, (row) => bridge.complete(row))
-        : solveAllParallel(pendingOrdered, planets, routes, parallel, (row) => bridge.complete(row));
+        ? solveSequentialWithNotify(
+            pendingOrdered,
+            planets,
+            routes,
+            showProgress,
+            graphOpts,
+            (row) => bridge.complete(row),
+          )
+        : solveAllParallel(pendingOrdered, planets, routes, parallel, graphOpts, (row) => bridge.complete(row));
 
     let stopped = false;
     let stopReason = "";
@@ -441,6 +462,7 @@ async function main(): Promise<void> {
       const oneStart = Date.now();
       let attempts = 0;
       const result = solveGraph(challenge, planets, routes, {
+        ...graphOpts,
         onBeforeSolveAttempt: ({ k, phase }) => {
           attempts++;
           if (!showProgress) return;
@@ -460,7 +482,7 @@ async function main(): Promise<void> {
       }
     }
   } else {
-    solved = await solveAllParallel(pendingOrdered, planets, routes, parallel);
+    solved = await solveAllParallel(pendingOrdered, planets, routes, parallel, graphOpts);
     for (const row of solved) {
       printSolvedLine(row.challenge, row.result, row.elapsedMs, quiet);
       if (!quiet && row.elapsedMs >= warnAfterMs) {

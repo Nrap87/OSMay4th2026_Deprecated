@@ -92,6 +92,22 @@ function createPerChallengeClock(virtualSecondsPerAttempt: number): (challengeId
   };
 }
 
+function createBatchSolveOptions(
+  fastSim: boolean,
+  virtualSecondsPerAttempt: number,
+  skipAscent: boolean,
+): ((challengeId: number) => SolveGraphOptions) | undefined {
+  if (fastSim) {
+    const inner = createPerChallengeClock(virtualSecondsPerAttempt);
+    if (!skipAscent) return inner;
+    return (cid) => ({ ...inner(cid), skipAscent: true });
+  }
+  if (skipAscent) {
+    return () => ({ skipAscent: true });
+  }
+  return undefined;
+}
+
 async function loadGameContext(): Promise<{
   planets: PlanetOut[];
   routes: RouteOut[];
@@ -165,6 +181,7 @@ const server = http.createServer(async (req, res) => {
         fastSim?: boolean;
         virtualSecondsPerAttempt?: number;
         useFixture?: boolean;
+        skipAscent?: boolean;
       } = {};
       try {
         body = raw ? (JSON.parse(raw) as typeof body) : {};
@@ -176,6 +193,7 @@ const server = http.createServer(async (req, res) => {
       const submit = Boolean(body.submit);
       const { playerGuid, playerEmail } = getEnforcedPlayer();
       const fastSim = body.fastSim !== false;
+      const skipAscent = body.skipAscent === true;
       const virtualSecondsPerAttempt =
         typeof body.virtualSecondsPerAttempt === "number" && body.virtualSecondsPerAttempt > 0
           ? body.virtualSecondsPerAttempt
@@ -197,7 +215,7 @@ const server = http.createServer(async (req, res) => {
         routes,
         challenges,
         submit,
-        createSolveOptions: fastSim ? createPerChallengeClock(virtualSecondsPerAttempt) : undefined,
+        createSolveOptions: createBatchSolveOptions(fastSim, virtualSecondsPerAttempt, skipAscent),
         getKCheckpoint: (cid) => checkpointStore.getResumeK(playerGuid, playerEmail, cid),
         saveKCheckpoint: (cid, k) => checkpointStore.save(playerGuid, playerEmail, cid, k),
         clearKCheckpoint: (cid) => checkpointStore.clear(playerGuid, playerEmail, cid),
@@ -223,6 +241,7 @@ const server = http.createServer(async (req, res) => {
         fastSim?: boolean;
         virtualSecondsPerAttempt?: number;
         useFixture?: boolean;
+        skipAscent?: boolean;
       } = {};
       try {
         body = raw ? (JSON.parse(raw) as typeof body) : {};
@@ -238,6 +257,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const fastSim = body.fastSim !== false;
+      const skipAscent = body.skipAscent === true;
       const virtualSecondsPerAttempt =
         typeof body.virtualSecondsPerAttempt === "number" && body.virtualSecondsPerAttempt > 0
           ? body.virtualSecondsPerAttempt
@@ -275,6 +295,7 @@ const server = http.createServer(async (req, res) => {
       const baseOpts = fastSim ? createPerChallengeClock(virtualSecondsPerAttempt)(challenge.challengeId) : {};
       const solved = solveGraph(challenge, planets, routes, {
         ...baseOpts,
+        ...(skipAscent ? { skipAscent: true } : {}),
         resumeLadderFromK: resumeK ?? baseOpts.resumeLadderFromK ?? null,
       });
 
@@ -308,6 +329,7 @@ const server = http.createServer(async (req, res) => {
         fastSim?: boolean;
         virtualSecondsPerAttempt?: number;
         useFixture?: boolean;
+        skipAscent?: boolean;
       } = {};
       try {
         body = raw ? (JSON.parse(raw) as typeof body) : {};
@@ -323,6 +345,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const fastSim = body.fastSim !== false;
+      const skipAscent = body.skipAscent === true;
       const virtualSecondsPerAttempt =
         typeof body.virtualSecondsPerAttempt === "number" && body.virtualSecondsPerAttempt > 0
           ? body.virtualSecondsPerAttempt
@@ -373,6 +396,7 @@ const server = http.createServer(async (req, res) => {
         const baseOpts = fastSim ? createPerChallengeClock(virtualSecondsPerAttempt)(challenge.challengeId) : {};
         const solved = solveGraph(challenge, planets, routes, {
           ...baseOpts,
+          ...(skipAscent ? { skipAscent: true } : {}),
           resumeLadderFromK: resumeK ?? baseOpts.resumeLadderFromK ?? null,
           onBeforeSolveAttempt: ({ k, phase }) => {
             sendLine({ type: "progress", k, phase });
@@ -414,6 +438,7 @@ const server = http.createServer(async (req, res) => {
         submit?: boolean;
         fastSim?: boolean;
         virtualSecondsPerAttempt?: number;
+        skipAscent?: boolean;
       } = {};
       try {
         body = raw ? (JSON.parse(raw) as typeof body) : {};
@@ -430,6 +455,7 @@ const server = http.createServer(async (req, res) => {
 
       const submitToApi = Boolean(body.submit);
       const fastSim = body.fastSim !== false;
+      const skipAscent = body.skipAscent === true;
       const virtualSecondsPerAttempt =
         typeof body.virtualSecondsPerAttempt === "number" && body.virtualSecondsPerAttempt > 0
           ? body.virtualSecondsPerAttempt
@@ -465,6 +491,7 @@ const server = http.createServer(async (req, res) => {
       const baseOpts = fastSim ? createPerChallengeClock(virtualSecondsPerAttempt)(challenge.challengeId) : {};
       const solved = solveGraph(challenge, planets, routes, {
         ...baseOpts,
+        ...(skipAscent ? { skipAscent: true } : {}),
         resumeLadderFromK: resumeK ?? baseOpts.resumeLadderFromK ?? null,
       });
 
