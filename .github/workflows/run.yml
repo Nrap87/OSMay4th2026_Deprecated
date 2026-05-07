@@ -1,18 +1,54 @@
-name: Run TypeScript
+# Push/PR: TypeScript compile only (no OutSystems calls).
+# workflow_dispatch or schedule: build + npm run solve:dry:submit (live API + submit — use with care).
+# Cron is always UTC. Fields: minute hour day-of-month month day-of-week.
+
+name: CI
 
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   schedule:
-    - cron: '0 22 * * *'  # optional: weekly schedule
+    # Default: 22:20 UTC every day — edit the cron expression to change the time.
+    - cron: "28 22 * * *"
+  workflow_dispatch:
+    inputs:
+      quiet:
+        description: "Append --quiet (minimal logs + Total elapsed line)"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
-  run:
+  build:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
+          cache: npm
       - run: npm ci
-      - run: npx ts-node src/index.ts
+      - run: npm run build:server
+
+  solve-dry-submit:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - run: npm run build:server
+      - name: Solve (parallel) + submit (quiet)
+        if: github.event_name == 'workflow_dispatch' && inputs.quiet == true
+        # To override REST base, add env here (do not set empty STAR_DELIVERY_BASE_URL).
+        run: npm run solve:dry:submit -- --quiet
+
+      - name: Solve (parallel) + submit
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.quiet != true)
+        run: npm run solve:dry:submit
