@@ -1,0 +1,29 @@
+{
+  "name": "star-delivery-tsp-simulator-ts",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Simulation of Star Delivery batch + K-ladder + checkpoint flow (mock solver, no real API).",
+  "scripts": {
+    "build": "npm run build:server && npm run build:client",
+    "build:server": "tsc",
+    "build:client": "npm run build --prefix client",
+    "presolve:dry": "npm run build:server",
+    "solve:dry": "node dist/cli/solveDry.js",
+    "solve:dry:submit": "npm run build:server && npm run solve:dry -- --parallel=3 --submit --warnAfterMs=15000 --includeFinished",
+    "solve:dry:run": "node dist/cli/solveDry.js",
+    "presolve:submit": "npm run build:server",
+    "solve:submit": "node dist/cli/solveSubmit.js",
+    "solve:submit:run": "node dist/cli/solveSubmit.js",
+    "web": "node dist/server.js",
+    "dev": "concurrently -n api,vite -c blue,green \"npm run web\" \"npm run dev --prefix client\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "concurrently": "^9.2.1",
+    "typescript": "~5.7.2"
+  }
+}
