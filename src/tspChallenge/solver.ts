@@ -1,3 +1,13 @@
+import {
+  SolverMaxBonusPlanets,
+  TspAggressiveDefaultMaxPermutations,
+  TspAggressiveSearch,
+  TspCheapStitchBeforeDfs,
+  TspHeuristicOrdersFirst,
+  TspInnerExpandedNodeBudget,
+  TspMaxPermutationsPerSubset,
+  TspSkipDfsWhenCheapStitchSucceeds,
+} from "../config.js";
 import { MinPriorityQueue } from "../priorityQueue.js";
 import { DEFAULT_REQUESTED_K, effectiveKByKeyNodes } from "./adaptiveK.js";
 import type { BonusStop, PlanetNode, RouteDiscount, SolverInput, SolverOutput } from "./types.js";
@@ -227,64 +237,82 @@ function pathCostOnGraph(g: TspGeometricGraph, path: readonly number[]): number 
   return total;
 }
 
-function yenKShortestPaths(
+/** Mutable Yen state for lazy extension (one increment adds the next shortest path). */
+type YenIncrementalState = {
+  accepted: PathCandidate[];
+  candidates: MinPriorityQueue<PathCandidate>;
+  seenKeys: Set<string>;
+};
+
+function yenInitState(
   g: TspGeometricGraph,
   source: number,
   target: number,
-  k: number,
   forbiddenNodes: Set<number>,
-  /** When set, skip the initial Dijkstra (must be the true shortest path for this instance). */
   firstPathHint?: PathCandidate,
-): PathCandidate[] {
+): YenIncrementalState | null {
   const first =
     firstPathHint ?? dijkstraOnGraph(g, source, target, forbiddenNodes, EMPTY_FORBIDDEN_EDGES);
-  if (first === null) return [];
+  if (first === null) return null;
+  return {
+    accepted: [first],
+    candidates: new MinPriorityQueue<PathCandidate>(),
+    seenKeys: new Set<string>(),
+  };
+}
 
-  const accepted: PathCandidate[] = [first];
-  const candidates = new MinPriorityQueue<PathCandidate>();
-  const seenKeys = new Set<string>();
+/**
+ * Append one more simple path (next shortest under Yen's construction) if it exists.
+ * `maxPaths` caps total accepted paths including the first.
+ */
+function yenAppendNext(
+  state: YenIncrementalState,
+  g: TspGeometricGraph,
+  target: number,
+  forbiddenNodes: Set<number>,
+  maxPaths: number,
+): boolean {
+  if (state.accepted.length >= maxPaths) return false;
+
   const { edgeMul } = g;
+  const previous = state.accepted[state.accepted.length - 1]!.path;
 
-  for (let kth = 1; kth < k; kth++) {
-    const previous = accepted[kth - 1]!.path;
-    for (let i = 0; i < previous.length - 1; i++) {
-      const spurNode = previous[i]!;
-      const rootPath = previous.slice(0, i + 1);
+  for (let i = 0; i < previous.length - 1; i++) {
+    const spurNode = previous[i]!;
+    const rootPath = previous.slice(0, i + 1);
 
-      const localForbiddenEdges = new Set<number>();
-      for (const acceptedPath of accepted) {
-        if (acceptedPath.path.length <= i) continue;
-        if (pathsPrefixEqual(acceptedPath.path, rootPath)) {
-          const a = acceptedPath.path[i]!;
-          const b = acceptedPath.path[i + 1]!;
-          localForbiddenEdges.add(packDirectedEdge(a, b, edgeMul));
-          localForbiddenEdges.add(packDirectedEdge(b, a, edgeMul));
-        }
+    const localForbiddenEdges = new Set<number>();
+    for (const acceptedPath of state.accepted) {
+      if (acceptedPath.path.length <= i) continue;
+      if (pathsPrefixEqual(acceptedPath.path, rootPath)) {
+        const a = acceptedPath.path[i]!;
+        const b = acceptedPath.path[i + 1]!;
+        localForbiddenEdges.add(packDirectedEdge(a, b, edgeMul));
+        localForbiddenEdges.add(packDirectedEdge(b, a, edgeMul));
       }
-
-      const localForbiddenNodes = new Set<number>(forbiddenNodes);
-      for (let rootIndex = 0; rootIndex < rootPath.length - 1; rootIndex++) {
-        localForbiddenNodes.add(rootPath[rootIndex]!);
-      }
-
-      const spurPath = dijkstraOnGraph(g, spurNode, target, localForbiddenNodes, localForbiddenEdges);
-      if (spurPath === null) continue;
-
-      const totalPath = rootPath.slice(0, -1).concat(spurPath.path);
-      const key = totalPath.join(">");
-      if (seenKeys.has(key)) continue;
-      seenKeys.add(key);
-
-      const pathCostVal = pathCostOnGraph(g, totalPath);
-      candidates.enqueue({ cost: pathCostVal, path: totalPath }, pathCostVal);
     }
 
-    const nextCandidate = candidates.tryDequeue();
-    if (nextCandidate === undefined) break;
-    accepted.push(nextCandidate.value);
+    const localForbiddenNodes = new Set<number>(forbiddenNodes);
+    for (let rootIndex = 0; rootIndex < rootPath.length - 1; rootIndex++) {
+      localForbiddenNodes.add(rootPath[rootIndex]!);
+    }
+
+    const spurPath = dijkstraOnGraph(g, spurNode, target, localForbiddenNodes, localForbiddenEdges);
+    if (spurPath === null) continue;
+
+    const totalPath = rootPath.slice(0, -1).concat(spurPath.path);
+    const key = totalPath.join(">");
+    if (state.seenKeys.has(key)) continue;
+    state.seenKeys.add(key);
+
+    const pathCostVal = pathCostOnGraph(g, totalPath);
+    state.candidates.enqueue({ cost: pathCostVal, path: totalPath }, pathCostVal);
   }
 
-  return accepted.sort((a, b) => a.cost - b.cost).slice(0, k);
+  const nextCandidate = state.candidates.tryDequeue();
+  if (nextCandidate === undefined) return false;
+  state.accepted.push(nextCandidate.value);
+  return true;
 }
 
 function popCount(mask: number): number {
@@ -390,9 +418,19 @@ function strictlyBetter(
  * Stitch one route along key-node sequence using shortest available segment candidates that stay
  * vertex-disjoint (same rule as DFS): no planet repeats except returning to start at the end.
  */
+/** Disjoint stitch using only KSP index 0 per segment (single shortest path per leg). */
+function tryCheapStitchDisjointOnly(
+  sequence: readonly number[],
+  getKspPathAt: (from: number, to: number, pathIndex: number) => PathCandidate | null,
+): { path: number[]; gross: number } | null {
+  return tryStitchDisjointFromSequence(sequence, (from, to, idx) =>
+    idx === 0 ? getKspPathAt(from, to, 0) : null,
+  );
+}
+
 function tryStitchDisjointFromSequence(
   sequence: readonly number[],
-  pathsForPair: (from: number, to: number) => readonly PathCandidate[],
+  getKspPathAt: (from: number, to: number, pathIndex: number) => PathCandidate | null,
 ): { path: number[]; gross: number } | null {
   const origin = sequence[0]!;
   const visited = new Set<number>([origin]);
@@ -403,10 +441,11 @@ function tryStitchDisjointFromSequence(
     const from = sequence[segIdx]!;
     const to = sequence[segIdx + 1]!;
     const isLast = segIdx === sequence.length - 2;
-    const candidates = pathsForPair(from, to);
     let picked: PathCandidate | null = null;
 
-    for (const candidate of candidates) {
+    for (let pathIndex = 0; ; pathIndex++) {
+      const candidate = getKspPathAt(from, to, pathIndex);
+      if (candidate === null) break;
       const intermediates = candidate.path.slice(1, -1);
       if (intermediates.some((node) => visited.has(node))) continue;
       const endpoint = candidate.path[candidate.path.length - 1]!;
@@ -427,13 +466,13 @@ function tryStitchDisjointFromSequence(
   return { path, gross };
 }
 
-/** Nearest-neighbor order over mandatory keys using cheapest KSP edge cost from current position. */
-function greedyMandatoryVisitOrder(
+/** Nearest-neighbor visit order over a set of key planets from `startId` (shortest-leg greedy). */
+function greedyKeyVisitOrder(
   startId: number,
-  mandatory: readonly number[],
+  keys: readonly number[],
   firstLeg: (from: number, to: number) => PathCandidate | null,
 ): number[] {
-  const remaining = new Set(mandatory);
+  const remaining = new Set(keys);
   const order: number[] = [];
   let current = startId;
 
@@ -455,7 +494,16 @@ function greedyMandatoryVisitOrder(
     current = bestNext;
   }
 
-  return order.length === mandatory.length ? order : [];
+  return order.length === keys.length ? order : [];
+}
+
+/** Nearest-neighbor order over mandatory keys using cheapest KSP edge cost from current position. */
+function greedyMandatoryVisitOrder(
+  startId: number,
+  mandatory: readonly number[],
+  firstLeg: (from: number, to: number) => PathCandidate | null,
+): number[] {
+  return greedyKeyVisitOrder(startId, mandatory, firstLeg);
 }
 
 function failed(errorMessage: string, effectiveKUsed = 0): SolverOutput {
@@ -521,6 +569,24 @@ export function solveChallengeTsp(input: SolverInput): SolverOutput {
   const keyNodeIds = [...new Set([startId, ...mandatory, ...validBonuses.map((bonus) => bonus.planetId)])];
   const requestedK = input.requestedK ?? DEFAULT_REQUESTED_K;
   const k = effectiveKByKeyNodes(requestedK, keyNodeIds.length);
+
+  if (validBonuses.length > SolverMaxBonusPlanets) {
+    return failed(
+      `Too many bonus planets (${validBonuses.length}); maximum supported is ${SolverMaxBonusPlanets}.`,
+      k,
+    );
+  }
+
+  const maxPermsAfterSort =
+    TspMaxPermutationsPerSubset > 0
+      ? TspMaxPermutationsPerSubset
+      : TspAggressiveSearch
+        ? TspAggressiveDefaultMaxPermutations
+        : 0;
+
+  const tryHeuristicPermsFirst = TspAggressiveSearch || TspHeuristicOrdersFirst;
+  const skipDfsWhenCheapSucceeds = TspAggressiveSearch || TspSkipDfsWhenCheapStitchSucceeds;
+
   debugTspLog("solve-start", {
     startId,
     mandatoryCount: mandatory.length,
@@ -529,51 +595,68 @@ export function solveChallengeTsp(input: SolverInput): SolverOutput {
     keyNodeCount: keyNodeIds.length,
     requestedK,
     effectiveKUsed: k,
+    tspAggressiveSearch: TspAggressiveSearch,
+    maxPermsAfterSort: maxPermsAfterSort || null,
+    tryHeuristicPermsFirst,
+    skipDfsWhenCheapSucceeds,
   });
 
   const { mainSet, otherSet } = buildDiscountSets(input.routes);
   const g = buildTspGeometricGraph(planetsById, mainSet, otherSet);
   const pairKey = (a: number, b: number): string => `${a}-${b}`;
   const firstLegMemo = new Map<string, PathCandidate | null>();
-  const kspFullMemo = new Map<string, PathCandidate[]>();
+  type LazyKspEntry = { yenState: YenIncrementalState | null };
+  const lazyKspMemo = new Map<string, LazyKspEntry>();
 
   function memoFirstLeg(from: number, to: number): PathCandidate | null {
     const key = pairKey(from, to);
     if (firstLegMemo.has(key)) return firstLegMemo.get(key)!;
-    const fullDone = kspFullMemo.get(key);
-    if (fullDone !== undefined) {
-      const fl = fullDone.length > 0 ? fullDone[0]! : null;
-      firstLegMemo.set(key, fl);
-      return fl;
-    }
     const p = dijkstraOnGraph(g, from, to, forbidden, EMPTY_FORBIDDEN_EDGES);
     firstLegMemo.set(key, p);
     return p;
   }
 
-  function memoKspFull(from: number, to: number): PathCandidate[] {
+  /** Lazily extends Yen's paths only as far as `pathIndex` requires (cap `k`). */
+  function getKspPathAt(from: number, to: number, pathIndex: number): PathCandidate | null {
+    if (pathIndex >= k) return null;
     const key = pairKey(from, to);
-    const hit = kspFullMemo.get(key);
-    if (hit !== undefined) return hit;
-
-    let hint: PathCandidate | undefined;
-    if (firstLegMemo.has(key)) {
-      const fl = firstLegMemo.get(key)!;
-      if (fl === null) {
-        kspFullMemo.set(key, []);
-        return [];
+    let entry = lazyKspMemo.get(key);
+    if (entry === undefined) {
+      let hint: PathCandidate | undefined;
+      if (firstLegMemo.has(key)) {
+        const fl = firstLegMemo.get(key)!;
+        if (fl === null) {
+          lazyKspMemo.set(key, { yenState: null });
+          return null;
+        }
+        hint = fl;
       }
-      hint = fl;
+
+      const state = yenInitState(g, from, to, forbidden, hint);
+      if (state === null) {
+        lazyKspMemo.set(key, { yenState: null });
+        if (!firstLegMemo.has(key)) firstLegMemo.set(key, null);
+        return null;
+      }
+
+      entry = { yenState: state };
+      lazyKspMemo.set(key, entry);
+      if (!firstLegMemo.has(key)) {
+        firstLegMemo.set(key, state.accepted[0]!);
+      }
     }
 
-    const paths = yenKShortestPaths(g, from, to, k, forbidden, hint);
-    kspFullMemo.set(key, paths);
-    if (!firstLegMemo.has(key)) {
-      firstLegMemo.set(key, paths.length > 0 ? paths[0]! : null);
+    if (entry.yenState === null) return null;
+
+    const state = entry.yenState;
+    while (pathIndex >= state.accepted.length && state.accepted.length < k) {
+      if (!yenAppendNext(state, g, to, forbidden, k)) break;
     }
-    return paths;
+
+    return state.accepted[pathIndex] ?? null;
   }
 
+  let innerSearchAborted = false;
   const reachabilityCore = [startId, ...mandatory];
   for (const from of reachabilityCore) {
     for (const to of reachabilityCore) {
@@ -597,6 +680,9 @@ export function solveChallengeTsp(input: SolverInput): SolverOutput {
     pruneIntermediateCollision: 0,
     pruneEndpointCollision: 0,
     pruneNoCandidates: 0,
+    pruneInnerBudgetAbort: 0,
+    cheapStitchHits: 0,
+    cheapStitchSkippedDfs: 0,
     bestUpdates: 0,
     greedySeedApplied: 0,
   };
@@ -611,6 +697,11 @@ export function solveChallengeTsp(input: SolverInput): SolverOutput {
     pathSoFar: number[],
     bonusCredit: number,
   ): void => {
+    if (TspInnerExpandedNodeBudget > 0 && searchCounters.expandedNodes >= TspInnerExpandedNodeBudget) {
+      searchCounters.pruneInnerBudgetAbort++;
+      innerSearchAborted = true;
+      return;
+    }
     searchCounters.expandedNodes++;
     if (costSoFar - bonusCredit >= bestEffective - EPSILON) return;
     if (idx === segments.length) {
@@ -633,14 +724,13 @@ export function solveChallengeTsp(input: SolverInput): SolverOutput {
     }
 
     const segment = segments[idx];
-    const candidates = memoKspFull(segment.from, segment.to);
-    if (candidates.length === 0) {
-      searchCounters.pruneNoCandidates++;
-      return;
-    }
     const isLast = idx === segments.length - 1;
 
-    for (const candidate of candidates) {
+    let sawCandidate = false;
+    for (let pathIndex = 0; ; pathIndex++) {
+      const candidate = getKspPathAt(segment.from, segment.to, pathIndex);
+      if (candidate === null) break;
+      sawCandidate = true;
       if (costSoFar + candidate.cost - bonusCredit >= bestEffective - EPSILON) {
         searchCounters.pruneBound++;
         break;
@@ -669,13 +759,89 @@ export function solveChallengeTsp(input: SolverInput): SolverOutput {
         bonusCredit,
       );
     }
+
+    if (!sawCandidate) {
+      searchCounters.pruneNoCandidates++;
+    }
+  };
+
+  const runStitchedSearchForPermutation = (
+    sequence: readonly number[],
+    segments: Segment[],
+    bonusCredit: number,
+    traceLabel: string,
+  ): void => {
+    currentTraceLabel = traceLabel;
+    let skipDfs = false;
+    if (TspCheapStitchBeforeDfs) {
+      const cheap = tryCheapStitchDisjointOnly(sequence, getKspPathAt);
+      if (cheap !== null && !hasIllegalRepeats(cheap.path, startId)) {
+        searchCounters.cheapStitchHits++;
+        const effective = cheap.gross - bonusCredit;
+        if (strictlyBetter(effective, cheap.gross, bestEffective, bestGross)) {
+          searchCounters.bestUpdates++;
+          bestEffective = effective;
+          bestGross = cheap.gross;
+          bestBonus = bonusCredit;
+          bestRoute = [...cheap.path];
+          debugTspLog("cheap-stitch-hit", {
+            trace: traceLabel,
+            bestEffective,
+            bestGross,
+            bonusCredit,
+          });
+        }
+        if (skipDfsWhenCheapSucceeds) {
+          searchCounters.cheapStitchSkippedDfs++;
+          skipDfs = true;
+        }
+      }
+    }
+    if (!skipDfs) {
+      dfsDisjoint(segments, 0, new Set<number>([startId]), 0, [startId], bonusCredit);
+    }
+  };
+
+  const runOnePermutationPipeline = (
+    permutation: readonly number[],
+    subset: readonly BonusStop[],
+    subsetIndex: number,
+    permutationIndex: number,
+    bonusCredit: number,
+  ): void => {
+    const sequence = [startId, ...permutation, startId];
+    let optimisticGross = 0;
+    let missingEdge = false;
+    for (let index = 0; index < sequence.length - 1; index++) {
+      const leg = memoFirstLeg(sequence[index]!, sequence[index + 1]!);
+      if (leg === null) {
+        missingEdge = true;
+        break;
+      }
+      optimisticGross += leg.cost;
+    }
+    if (missingEdge) {
+      searchCounters.prunePermutationBound++;
+      return;
+    }
+    const optimisticEffective = optimisticGross - bonusCredit;
+    if (optimisticEffective >= bestEffective - EPSILON) {
+      searchCounters.prunePermutationBound++;
+      return;
+    }
+    const segments: Segment[] = [];
+    for (let index = 0; index < sequence.length - 1; index++) {
+      segments.push({ from: sequence[index]!, to: sequence[index + 1]! });
+    }
+    const traceLabel = `subset#${subsetIndex} bonus=[${subset.map((b) => b.planetId).join(",") || "none"}] perm#${permutationIndex}`;
+    runStitchedSearchForPermutation(sequence, segments, bonusCredit, traceLabel);
   };
 
   if (mandatory.length > 0) {
     const nnOrder = greedyMandatoryVisitOrder(startId, mandatory, memoFirstLeg);
     if (nnOrder.length === mandatory.length) {
       const seedSequence = [startId, ...nnOrder, startId];
-      const stitched = tryStitchDisjointFromSequence(seedSequence, memoKspFull);
+      const stitched = tryStitchDisjointFromSequence(seedSequence, getKspPathAt);
       if (stitched !== null && !hasIllegalRepeats(stitched.path, startId)) {
         const bonusCredit = 0;
         const effective = stitched.gross - bonusCredit;
@@ -698,84 +864,60 @@ export function solveChallengeTsp(input: SolverInput): SolverOutput {
   }
 
   let subsetIndex = 0;
-  for (const subset of bonusSubsetsBySize(validBonuses)) {
+  subsetLoop: for (const subset of bonusSubsetsBySize(validBonuses)) {
     subsetIndex++;
+    if (innerSearchAborted) break subsetLoop;
     const bonusCredit = subset.reduce((sum, bonus) => sum + bonus.value, 0);
     if (-bonusCredit >= bestEffective - EPSILON) {
       searchCounters.pruneSubsetBonusBound++;
       continue;
     }
     const forcedStops = [...new Set([...mandatory, ...subset.map((bonus) => bonus.planetId)])];
+
+    const mergedPermutations: number[][] = [];
+    const permKeySeen = new Set<string>();
+    const pushUniquePerm = (perm: number[]): void => {
+      if (perm.length !== forcedStops.length) return;
+      const pk = perm.join("\0");
+      if (permKeySeen.has(pk)) return;
+      permKeySeen.add(pk);
+      mergedPermutations.push(perm);
+    };
+
+    if (tryHeuristicPermsFirst) {
+      const nn = greedyKeyVisitOrder(startId, forcedStops, memoFirstLeg);
+      if (nn.length === forcedStops.length) {
+        pushUniquePerm(nn);
+        pushUniquePerm([...nn].reverse());
+      }
+    }
+
+    const slotLimit = maxPermsAfterSort > 0 ? maxPermsAfterSort : 10_000_000;
+
     if (forcedStops.length <= PERMUTATION_SORT_MAX_STOPS) {
       const sortedPermutations = collectAllPermutations(forcedStops);
       sortPermutationsByEuclideanLb(sortedPermutations, planetsById, startId, bonusCredit);
-      let permutationIndex = 0;
-      for (const permutation of sortedPermutations) {
-        permutationIndex++;
-        const sequence = [startId, ...permutation, startId];
-        let optimisticGross = 0;
-        let missingEdge = false;
-        for (let index = 0; index < sequence.length - 1; index++) {
-          const leg = memoFirstLeg(sequence[index]!, sequence[index + 1]!);
-          if (leg === null) {
-            missingEdge = true;
-            break;
-          }
-          optimisticGross += leg.cost;
-        }
-        if (missingEdge) {
-          searchCounters.prunePermutationBound++;
-          continue;
-        }
-        const optimisticEffective = optimisticGross - bonusCredit;
-        if (optimisticEffective >= bestEffective - EPSILON) {
-          searchCounters.prunePermutationBound++;
-          continue;
-        }
-        const segments: Segment[] = [];
-        for (let index = 0; index < sequence.length - 1; index++) {
-          segments.push({ from: sequence[index]!, to: sequence[index + 1]! });
-        }
-        currentTraceLabel = `subset#${subsetIndex} bonus=[${subset.map((b) => b.planetId).join(",") || "none"}] perm#${permutationIndex}`;
-        dfsDisjoint(segments, 0, new Set<number>([startId]), 0, [startId], bonusCredit);
-      }
+      const room = Math.max(0, slotLimit - mergedPermutations.length);
+      const capped = maxPermsAfterSort > 0 ? sortedPermutations.slice(0, room) : sortedPermutations.slice();
+      for (const p of capped) pushUniquePerm(p);
     } else {
-      let permutationIndex = 0;
       for (const permutation of permutations(forcedStops)) {
-        permutationIndex++;
-        const sequence = [startId, ...permutation, startId];
-        let optimisticGross = 0;
-        let missingEdge = false;
-        for (let index = 0; index < sequence.length - 1; index++) {
-          const leg = memoFirstLeg(sequence[index]!, sequence[index + 1]!);
-          if (leg === null) {
-            missingEdge = true;
-            break;
-          }
-          optimisticGross += leg.cost;
-        }
-        if (missingEdge) {
-          searchCounters.prunePermutationBound++;
-          continue;
-        }
-        const optimisticEffective = optimisticGross - bonusCredit;
-        if (optimisticEffective >= bestEffective - EPSILON) {
-          searchCounters.prunePermutationBound++;
-          continue;
-        }
-        const segments: Segment[] = [];
-        for (let index = 0; index < sequence.length - 1; index++) {
-          segments.push({ from: sequence[index]!, to: sequence[index + 1]! });
-        }
-        currentTraceLabel = `subset#${subsetIndex} bonus=[${subset.map((b) => b.planetId).join(",") || "none"}] perm#${permutationIndex}`;
-        dfsDisjoint(segments, 0, new Set<number>([startId]), 0, [startId], bonusCredit);
+        if (mergedPermutations.length >= slotLimit) break;
+        pushUniquePerm(permutation);
       }
+    }
+
+    let permutationIndex = 0;
+    for (const permutation of mergedPermutations) {
+      permutationIndex++;
+      runOnePermutationPipeline(permutation, subset, subsetIndex, permutationIndex, bonusCredit);
+      if (innerSearchAborted) break subsetLoop;
     }
   }
 
   debugTspLog("ksp-lazy-summary", {
     directedPairsFirstLegMemo: firstLegMemo.size,
-    directedPairsFullKspMemo: kspFullMemo.size,
+    directedPairsLazyKspMemo: lazyKspMemo.size,
     possibleDirectedKeyPairs: keyNodeIds.length * (keyNodeIds.length - 1),
   });
 
@@ -788,7 +930,12 @@ export function solveChallengeTsp(input: SolverInput): SolverOutput {
   });
 
   if (bestRoute === null) {
-    return failed("No valid route found after applying mandatory and forbidden rules.", k);
+    const base = "No valid route found after applying mandatory and forbidden rules.";
+    const suffix =
+      innerSearchAborted && TspInnerExpandedNodeBudget > 0
+        ? ` (Inner search expanded-node budget ${TspInnerExpandedNodeBudget} exceeded; increase TspInnerExpandedNodeBudget in config if appropriate.)`
+        : "";
+    return failed(`${base}${suffix}`, k);
   }
   if (hasIllegalRepeats(bestRoute, startId)) {
     return failed("Best candidate repeats planets outside start re-entry rule.", k);

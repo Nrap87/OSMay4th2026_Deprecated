@@ -71,7 +71,7 @@ Environment (optional):
 ## Customize
 
 - Tune ladder speed vs quality in `src/config.ts` (`KLadderMinK`, `KLadderTopK`, `KLadderStep`, `KLadderAscentStopAfterStaleSuccesses`, `KLadderSkipAscent`). (`KLadderFloorK` is deprecated but kept as an alias of `KLadderMinK`.) For one-off fast runs, use CLI `--no-ascent` instead of editing config.
-- Set `createSolveOptions` to use real wall clock only: `{ }` (defaults to `Date.now`), understanding full ladder may take up to **5 minutes** per challenge.
+- Set `createSolveOptions` to use real wall clock only: `{ }` (defaults to `Date.now`), understanding full ladder may take up to **`KLadderTimeBudgetSeconds`** (~1000s default) per challenge.
 
 ## New constrained TSP core
 

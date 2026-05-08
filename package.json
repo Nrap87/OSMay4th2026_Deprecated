@@ -10,7 +10,7 @@
     "build:client": "npm run build --prefix client",
     "presolve:dry": "npm run build:server",
     "solve:dry": "node dist/cli/solveDry.js",
-    "solve:dry:submit": "npm run solve:dry -- --parallel=3 --submit --warnAfterMs=15000 --includeFinished",
+    "solve:dry:submit": "npm run solve:dry -- --parallel=3 --submit --warnAfterMs=15000",
     "solve:dry:run": "node dist/cli/solveDry.js",
     "presolve:submit": "npm run build:server",
     "solve:submit": "node dist/cli/solveSubmit.js",
